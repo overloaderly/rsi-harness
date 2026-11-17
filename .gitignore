@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 镜像归档（185 MB，只上传比赛站点，不进仓库）
+*.tar
+*.tar.gz
+
+# 本地运行产物
+runs/
+state/
+*.log
+ledger.json
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

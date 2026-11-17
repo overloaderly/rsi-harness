@@ -1,0 +1,47 @@
+name: build-harness
+
+# 云端 linux/amd64 构建，不需要本地装 Docker。
+# 用法：把这个仓库推到 GitHub -> Actions -> build-harness -> Run workflow
+#       等 3~5 分钟 -> 下载 artifact（rsi-harness-v1.tar 直接传比赛站点）
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve build context
+        id: ctx
+        run: |
+          if [ -f harness/Dockerfile ]; then echo "dir=harness" >> "$GITHUB_OUTPUT";
+          else echo "dir=." >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build image
+        run: docker build --platform linux/amd64 -t rsi-harness:v1 "${{ steps.ctx.outputs.dir }}"
+
+      - name: Describe
+        run: docker run --rm rsi-harness:v1 describe
+
+      - name: Offline selftest A/B/C
+        run: |
+          set -e
+          for task in A B C; do
+            echo "== selftest $task =="
+            docker run --rm --user 0 --entrypoint python3 rsi-harness:v1 \
+              /opt/harness-selftest/selftest.py --task "$task"
+          done
+
+      - name: Save image to tar
+        run: docker save rsi-harness:v1 -o rsi-harness-v1.tar
+
+      - name: Show size
+        run: ls -lh rsi-harness-v1.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsi-harness-v1-tar
+          path: rsi-harness-v1.tar
+          retention-days: 14

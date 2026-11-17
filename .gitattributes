@@ -1,0 +1,12 @@
+# 统一换行：源码在 Linux/macOS/Windows 上都能直接构建（Dockerfile 用 CRLF 会破坏续行）
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制
+*.npz binary
+*.tar binary
+*.png binary
+*.jpg binary
