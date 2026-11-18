@@ -1,15 +1,19 @@
-"""离线端到端自测：用假宿主跑两轮 train + 一次 predict，完全不需要平台。
+"""离线端到端自测 / 演示：用假宿主跑 N 轮 train + 一次 predict，完全不需要平台。
 
 用法（在镜像内，需要 root 才能写 /previous 和 /model）：
 
-    docker run --rm --user 0 rsi-harness:v1 \
-        python3 /opt/harness-selftest/selftest.py --task A
+    docker run --rm --user 0 --entrypoint python3 rsi-harness:v1 \
+        /opt/harness-selftest/selftest.py --task A
+
+    # 演示模式：分轮横幅 + 平台视角前缀 + 决策桩按历史指标模拟网关模型
+    docker run --rm --user 0 --entrypoint python3 rsi-harness:v1 \
+        /opt/harness-selftest/selftest.py --task A --rounds 3 --demo
 
     # 用真实公开数据（把 labs 目录挂进来）
-    docker run --rm --user 0 -v B:\\whale\\智训引擎\\labs:/labs:ro rsi-harness:v1 \
-        python3 /opt/harness-selftest/selftest.py --task B --data-dir /labs/cpu-b/public
+    docker run --rm --user 0 --entrypoint python3 -v B:\\whale\\智训引擎\\labs:/labs:ro rsi-harness:v1 \
+        /opt/harness-selftest/selftest.py --task B --data-dir /labs/cpu-b/public
 
-检查项：describe、两轮 train（含 history/state/候选回传/回滚决策）、predict 输出合法性。
+检查项：describe（平台侧另测）、N 轮 train（含 history/state/候选回传/回滚决策）、predict 输出合法性。
 """
 import argparse
 import base64
@@ -19,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -27,10 +32,45 @@ PROTOCOL = "contest.harness.workspace.v2"
 PREDICT_ARGV = ["python3", "/app/harness.py", "predict"]
 CLASSES_A = ["Ethanol", "Ethylene", "Ammonia", "Acetaldehyde", "Acetone", "Toluene"]
 TASK = {"A": "classification", "B": "regression", "C": "regression"}
+TASK_NAME = {"A": "气体识别 · 6 类 · Macro-F1", "B": "轴承 RUL · RMSE/MAE · 分钟",
+             "C": "发动机 RUL · RMSE/NASA 分 · 循环"}
+
+
+DEMO = False
+PRINT_LOCK = threading.Lock()
+
+
+def say(text=""):
+    with PRINT_LOCK:
+        print(text, flush=True)
 
 
 def log(message):
-    print("[selftest] " + str(message), flush=True)
+    say(("   [平台] " if DEMO else "[selftest] ") + str(message))
+
+
+def log_round(round_index, record):
+    if DEMO:
+        configuration = record.get("configuration") or {}
+        log("第 %d 轮完成：产物 %s · 决策 %s · 候选 %s" % (
+            round_index, record.get("selected_artifact_id"),
+            configuration.get("decision"), json.dumps(configuration.get("validation"), ensure_ascii=False)))
+    else:
+        log("第 %d 轮完成: %s" % (round_index, json.dumps(record, ensure_ascii=False)[:400]))
+
+
+def banner(title, char="─", width=68):
+    say("\n" + char * width)
+    say(" " + title)
+    say(char * width)
+
+
+def score_of(block):
+    return block.get("score") if isinstance(block, dict) else None
+
+
+def fmt_score(value):
+    return "n/a" if not isinstance(value, (int, float)) else "%.4f" % value
 
 
 def sha(raw):
@@ -95,16 +135,65 @@ def build_arrays(rows, task_key):
 
 # ------------------------------------------------------------------ 假宿主
 class Host:
-    def __init__(self):
+    def __init__(self, demo=False):
         self.candidate = None
         self.state = None
         self.records = []
         self.calls = 0
+        self.demo = demo
+
+    # ---------------------------------------------------------- 决策桩
+    def answer(self, frame):
+        """非演示模式下按环境变量返回固定决策；演示模式按历史指标模拟网关模型。"""
+        if not self.demo:
+            return os.environ.get("SELFTEST_DECISION", "train")
+        payload = {}
+        try:
+            text = "".join(str(item.get("content") or "") for item in frame.get("messages") or [])
+            begin, end = text.find("{"), text.rfind("}")
+            if begin >= 0 and end > begin:
+                payload = json.loads(text[begin:end + 1])
+        except (ValueError, TypeError):
+            payload = {}
+        history = payload.get("history") or []
+        task = payload.get("task")
+        parent = score_of(payload.get("parent_validation"))
+        planned = payload.get("planned_epochs")
+        if not history:
+            say("   ◂ 决策桩：history 为空（首轮），父基线=%s → train（按基准配置完整训练）"
+                  % fmt_score(parent))
+            return "train"
+        if len(history) < 2:
+            say("   ◂ 决策桩：历史只有 %d 条，还看不出趋势 → train（沿用基准配置继续训练）"
+                  % len(history))
+            return "train"
+        last = score_of(history[-1].get("validation"))
+        previous = score_of(history[-2].get("validation"))
+        if not isinstance(last, (int, float)) or not isinstance(previous, (int, float)):
+            say("   ◂ 决策桩：历史缺少可比较指标 → train（保守沿用基准配置）")
+            return "train"
+        improved = last > previous if task == "classification" else last < previous
+        if improved:
+            say("   ◂ 决策桩：上轮=%s 好于前一轮=%s （规划 %s epoch）→ conserve（小步微调，避免过拟合）"
+                  % (fmt_score(last), fmt_score(previous), planned))
+            return "conserve"
+        say("   ◂ 决策桩：上轮=%s 没有好于前一轮=%s → train（换回常规步长重新探索）"
+            % (fmt_score(last), fmt_score(previous)))
+        return "train"
+
+    def _pump(self, stream):
+        for line in stream:
+            text = line.rstrip()
+            if text:
+                say("   ▸ " + text)
+        stream.close()
 
     def serve_train(self, start, history, timeout=900):
         process = subprocess.Popen(
             [sys.executable, "/app/harness.py", "train"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", bufsize=1)
+        threading.Thread(target=self._pump, args=(process.stderr,), daemon=True).start()
         process.stdin.write(json.dumps(start, ensure_ascii=False) + "\n")
         process.stdin.flush()
         sequence, started = 0, time.monotonic()
@@ -135,9 +224,9 @@ class Host:
                 reply = {"type": "history_response", "id": frame["id"], "records": history}
             elif kind == "model_request":
                 self.calls += 1
+                content = self.answer(frame)
                 reply = {"type": "model_response", "id": frame["id"], "call_id": "call-%d" % self.calls,
-                         "response": {"choices": [{"message": {"role": "assistant",
-                                                               "content": os.environ.get("SELFTEST_DECISION", "train")}}]}}
+                         "response": {"choices": [{"message": {"role": "assistant", "content": content}}]}}
             elif kind == "state_request":
                 self.state = {item["path"]: base64.b64decode(item["data_base64"]) for item in frame.get("files") or []}
                 reply = {"type": "state_response", "id": frame["id"], "state_sha256": sha(b"state")}
@@ -225,9 +314,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", default="A", choices=["A", "B", "C"])
     parser.add_argument("--data-dir", default=None)
+    parser.add_argument("--parent", default=None, help="直接用给定的父检查点（例如 labs 里的官方基线）")
     parser.add_argument("--train-rows", type=int, default=200)
+    parser.add_argument("--val-rows", type=int, default=0, help="验证集行数上限，0 = 用整份")
+    parser.add_argument("--rounds", type=int, default=2)
+    parser.add_argument("--demo", action="store_true", help="分轮横幅 + 讲解式输出（录演示视频用）")
+    parser.add_argument("--pause", action="store_true", help="每轮结束后等待回车（录屏节奏用）")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+
+    global DEMO
+    DEMO = bool(args.demo)
+    started = time.monotonic()
+    if args.demo:
+        banner("智训引擎 Harness 离线演示 · 任务 %s（%s）" % (args.task, TASK_NAME[args.task]), "═")
 
     if ROOT.exists() and not args.keep:
         shutil.rmtree(ROOT)
@@ -236,10 +336,12 @@ def main():
     if args.data_dir:
         source = Path(args.data_dir)
         train = load_rows(source / "train.jsonl")[: args.train_rows]
-        validate = load_rows(source / "validation.jsonl")[: max(30, args.train_rows // 3)]
+        validate = load_rows(source / "validation.jsonl")
+        if args.val_rows:
+            validate = validate[:args.val_rows]
     else:
         train = synthetic(args.task, args.train_rows, 7)
-        validate = synthetic(args.task, max(30, args.train_rows // 3), 13)
+        validate = synthetic(args.task, args.val_rows or max(30, args.train_rows // 3), 13)
     write_rows(data_dir / "train.jsonl", train)
     write_rows(data_dir / "validation.jsonl", validate)
     log("数据: train=%d validation=%d (task %s)" % (len(train), len(validate), args.task))
@@ -249,11 +351,15 @@ def main():
 
     sys.path.insert(0, "/app")
     from rsi_model import Model
-    model = Model(TASK[args.task], paths, CLASSES_A if args.task == "A" else [], x, y,
-                  hidden=min(32, 96), seed=42, learning_rate=0.003, batch_size=64)
     parent_dir = ROOT / "parent"
     parent_dir.mkdir(parents=True, exist_ok=True)
-    model.save(parent_dir / "checkpoint.npz")
+    if args.parent:
+        shutil.copyfile(args.parent, parent_dir / "checkpoint.npz")
+        log("父检查点来自 --parent: %s" % args.parent)
+    else:
+        model = Model(TASK[args.task], paths, CLASSES_A if args.task == "A" else [], x, y,
+                      hidden=min(32, 96), seed=42, learning_rate=0.003, batch_size=64)
+        model.save(parent_dir / "checkpoint.npz")
     parent_raw = (parent_dir / "checkpoint.npz").read_bytes()
     parent_files = [{"path": "checkpoint.npz", "sha256": sha(parent_raw), "size_bytes": len(parent_raw)}]
     parent_digest = sha(parent_raw)
@@ -266,26 +372,42 @@ def main():
     previous.mkdir(parents=True)
     (previous / "checkpoint.npz").write_bytes(parent_raw)
 
-    host = Host()
+    host = Host(demo=args.demo)
     history = []
     state_dir = None
     artifacts = []
     artifact_id = None
-    for round_index in (1, 2):
-        if round_index == 2:
+    summary = []
+    for round_index in range(1, args.rounds + 1):
+        if round_index > 1:
             parent_files = host.materialize_parent()
             parent_digest = sha((Path("/previous") / parent_files[0]["path"]).read_bytes())
             artifacts = [{"artifact_id": artifact_id, "artifact": host.candidate["artifact"],
                           "files": parent_files}]
             state_dir = ROOT / "state-1"
+        if args.demo:
+            banner("第 %d 轮 / 共 %d 轮 · 父产物 %s" % (round_index, args.rounds, artifact_id or "官方基线"))
         record = host.serve_train(start_frame(args.task, round_index, parent_files, parent_digest,
                                               artifacts, data_dir, state_dir), history)
-        log("第 %d 轮完成: %s" % (round_index, json.dumps(record, ensure_ascii=False)[:400]))
+        configuration = record.get("configuration") or {}
+        summary.append({"round": round_index,
+                        "parent": configuration.get("parent_validation"),
+                        "current": configuration.get("validation"),
+                        "decision": configuration.get("decision"),
+                        "artifact": record.get("selected_artifact_id"),
+                        "reason": record.get("reason")})
+        log_round(round_index, record)
         artifact_id = record.get("selected_artifact_id") or artifact_id
         history = history + [{"id": "round-%d" % round_index,
                               "hypothesis": record.get("hypothesis"),
                               "configuration": record.get("configuration"),
                               "reason": record.get("reason")}]
+        if args.demo and round_index < args.rounds:
+            if args.pause:
+                try:
+                    input("\n  ⏸  已暂停，按回车进入第 %d 轮…… " % (round_index + 1))
+                except EOFError:
+                    pass
         if round_index == 1 and host.state:
             state_dir = ROOT / "state-1"
             state_dir.mkdir(parents=True, exist_ok=True)
@@ -301,7 +423,32 @@ def main():
 
     samples = [row["inputs"] for row in validate[:3]]
     outputs = predict_check(args.task, checkpoint, samples)
-    log("predict 输出: %s" % json.dumps(outputs, ensure_ascii=False)[:400])
+    if DEMO:
+        head = outputs[0]["outputs"] if outputs else None
+        if isinstance(head, list) and head:
+            best = max(head, key=lambda item: item["score"])
+            log("predict 输出: %d 条样本，首条 top-1 = %s（score %.3f），共 %d 个类别候选"
+                % (len(outputs), best["label"], best["score"], len(head)))
+        elif isinstance(head, dict):
+            log("predict 输出: %d 条样本，首条 value = %.2f（非负有限数）"
+                % (len(outputs), head["value"]))
+    else:
+        log("predict 输出: %s" % json.dumps(outputs, ensure_ascii=False)[:400])
+
+    if args.demo:
+        banner("实验台账 · %d 轮汇总" % args.rounds, "═")
+        for item in summary:
+            delta = ""
+            parent, current = score_of(item["parent"]), score_of(item["current"])
+            if isinstance(parent, (int, float)) and isinstance(current, (int, float)):
+                diff = current - parent
+                better = diff > 0 if TASK[args.task] == "classification" else diff < 0
+                delta = "  (%+.4f%s)" % (diff, " 采纳" if better else " 回滚/持平")
+            say(" 第 %d 轮  决策=%-8s 父=%s → 候选=%s%s" % (
+                item["round"], item["decision"], fmt_score(parent), fmt_score(current), delta))
+        say("\n 用时 %.1fs · 全程无人工干预 · 每轮 1 次模型调用" % (time.monotonic() - started))
+        say(" ledger.json 记录 %d 轮（读历史 → 做实验 → 依据结果决策 → 提交/回滚）" % args.rounds)
+
     log("自测通过 ✅")
 
 

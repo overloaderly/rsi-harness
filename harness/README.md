@@ -13,7 +13,8 @@
 | `rsi_data.py` | 输入展开（按字典键排序、列表下标编号），保证特征路径与父检查点一致 |
 | `harness.py` | 官方入口模板，7 行，平台以 `describe/train/predict` 调用 |
 | `vendor/` | SDK 1.0.2 源码（`pip install` 用） |
-| `selftest.py` | 离线自测：假宿主跑两轮 train + 一次 predict，不需要平台 |
+| `selftest.py` | 离线自测：假宿主跑 N 轮 train + 一次 predict，不需要平台；`--demo` 时输出可直接录屏的分轮讲解 |
+| `demo.bat` | 一键跑「三轮训练 + predict」演示（录屏用，`demo.bat A pause` 可逐轮暂停） |
 | `Dockerfile` | 镜像定义 |
 | `build.bat` | Windows 一键构建 + 自测 + `docker save` |
 | `.github/workflows/build-harness.yml` | 云端构建（无需本地 Docker） |
@@ -67,6 +68,24 @@ docker run --rm --user 0 --entrypoint python3 -v B:\whale\智训引擎\labs:/lab
 ```
 
 `--user 0` 是因为自测要写 `/previous` 和 `/model`（平台运行时这两个目录由平台挂载）。
+
+## 演示（录屏用）
+
+```bat
+demo.bat               :: 任务 A，三轮，一口气跑完
+demo.bat A pause       :: 每轮结束等回车，边讲边录
+demo.bat C             :: 任务 C（发动机 RUL），两轮
+```
+
+演示模式用 `labs/` 里的**官方父检查点**当基线、用整份公开验证集评分，所以数字可复现（任务 A：0.7140 → 0.7187 → 0.7217，第三轮 `conserve` 后变差并**自动回滚**）。分镜与台词见 `../演示视频_分镜与台词.md`。
+
+等价的完整命令：
+
+```bash
+docker run --rm --user 0 --entrypoint python3 -v <labs>:/labs:ro rsi-harness:v1 \
+  /opt/harness-selftest/selftest.py --task A --rounds 3 --demo \
+  --data-dir /labs/cpu-a/public --parent /labs/cpu-a/checkpoint.npz --train-rows 500
+```
 
 ## 每轮 train 做了什么
 
