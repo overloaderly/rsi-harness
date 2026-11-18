@@ -1,18 +1,3 @@
-"""rsi-index 智训引擎 · Harness 工作区 v2 提交模块（基础模型路线）。
-
-平台调用序列：
-    python3 /app/harness.py describe   -> 声明任务类型
-    python3 /app/harness.py train      -> 读 stdin 的 start 帧，跑一轮闭环
-    python3 /app/harness.py predict    -> 逐行读样本，写预测
-
-train 每轮做四件事（对应评分里的"读历史—做实验—依据结果决策"）：
-    1. 读 /state 的历史记录 + 平台 history，搞清楚上一轮做了什么、结果如何
-    2. 在公开 validation 上评估父检查点，得到本轮基线
-    3. 续训出候选并重新评估：变好提交新权重，变差回滚到父权重（恢复能力）
-    4. 用一次真实模型调用决定本轮步长，submit_candidate + finish 留下可核验记录
-
-约定：stdout 只给协议 JSONL，日志一律写 stderr。
-"""
 import json
 import os
 import sys
@@ -35,14 +20,11 @@ CLASSES = {
     "B": [],
     "C": [],
 }
-# 公开数据规模：A 445 / B 7032 / C 113089 行；C 全量解析太慢，默认截断
 MAX_TRAIN_ROWS = {"A": 5000, "B": 20000, "C": 40000}
 MAX_VAL_ROWS = {"A": 5000, "B": 8000, "C": 8000}
 
-
 def _log(message):
     print("[submission] " + str(message), file=sys.stderr, flush=True)
-
 
 def _env_int(name, default):
     try:
@@ -50,14 +32,10 @@ def _env_int(name, default):
     except (TypeError, ValueError):
         return default
 
-
 def _work():
     return Path(os.environ.get("CONTEST_WORK", "/workspace"))
 
-
-# ------------------------------------------------------------------ 数据
 def _rows(rows, task, classes, limit=0):
-    """把平台 JSONL 行展开成 (ids, x, y|None, feature_paths)。"""
     ids, features, labels, paths = [], [], [], None
     labeled = True
     for row in rows:
@@ -92,7 +70,6 @@ def _rows(rows, task, classes, limit=0):
         y = np.asarray(labels, dtype=np.int64 if task == "classification" else np.float64)
     return ids, x, y, paths
 
-
 def _macro_f1(y_true, y_pred, n_classes):
     scores = []
     for index in range(n_classes):
@@ -106,7 +83,6 @@ def _macro_f1(y_true, y_pred, n_classes):
         scores.append(2 * precision * recall / (precision + recall) if precision + recall else 0.0)
     return float(np.mean(scores)) if scores else 0.0
 
-
 def _metrics(task, y_true, y_pred, classes):
     if task == "classification":
         f1 = _macro_f1(y_true, y_pred, len(classes))
@@ -114,7 +90,6 @@ def _metrics(task, y_true, y_pred, classes):
                 "accuracy": round(float(np.mean(y_pred == y_true)), 6)}
     error = np.asarray(y_pred, dtype=np.float64) - np.asarray(y_true, dtype=np.float64)
     rmse = float(np.sqrt(np.mean(error ** 2)))
-    # NASA 非对称惩罚：提前预测罚得重、滞后预测罚得轻；指数要裁剪，否则大误差会溢出成 inf
     penalty = np.where(error < 0, np.expm1(np.clip(-error / 13.0, -30.0, 30.0)),
                        np.expm1(np.clip(error / 10.0, -30.0, 30.0)))
     nasa = float(np.sum(penalty))
@@ -122,7 +97,6 @@ def _metrics(task, y_true, y_pred, classes):
         nasa = 1e12
     return {"score": rmse, "rmse": round(rmse, 6), "mae": round(float(np.mean(np.abs(error))), 6),
             "nasa": round(nasa, 6)}
-
 
 def _evaluate(model, x, y, task, classes):
     if y is None:
@@ -132,7 +106,6 @@ def _evaluate(model, x, y, task, classes):
         return _metrics(task, y, np.argmax(prediction, axis=1), classes)
     return _metrics(task, y, prediction, classes)
 
-
 def _better(task, candidate, baseline):
     if not candidate or not baseline:
         return bool(candidate)
@@ -140,15 +113,12 @@ def _better(task, candidate, baseline):
         return candidate["score"] > baseline["score"] + 1e-6
     return candidate["score"] < baseline["score"] - 1e-9
 
-
-# ------------------------------------------------------------------ 契约读取
 def _kind(rnd, key):
     contract = rnd.task if isinstance(rnd.task, dict) else {}
     kind = contract.get("kind") or contract.get("task") or KIND.get(key)
     if kind not in TASKS:
         raise ValueError("无法判定任务类型: %r" % (kind,))
     return kind
-
 
 def _classes(rnd, key):
     contract = rnd.task if isinstance(rnd.task, dict) else {}
@@ -158,7 +128,6 @@ def _classes(rnd, key):
             return list(value)
     return list(CLASSES.get(key, []))
 
-
 def _parent_checkpoint(rnd):
     descriptor = getattr(rnd.parent, "descriptor", {}) or {}
     declared = [item for item in (descriptor.get("checkpoint_paths") or []) if isinstance(item, str)]
@@ -166,12 +135,11 @@ def _parent_checkpoint(rnd):
     if named:
         try:
             return rnd.parent.path(named), named
-        except Exception as error:  # noqa: BLE001 - 退回扫描，仍然只读父目录
+        except Exception as error:
             _log("按声明读取父检查点失败(%s)，改为扫描 /previous" % error)
     for candidate in sorted(Path("/previous").rglob("*.npz")):
         return candidate, candidate.name
     raise RuntimeError("找不到父检查点：/previous 下没有 .npz 文件")
-
 
 def _history_summary(history):
     summary = []
@@ -186,9 +154,7 @@ def _history_summary(history):
         })
     return summary
 
-
 def _ask(rnd, payload):
-    """让平台模型对本轮动作给一次真实决策；返回 (decision, call_id)。"""
     body = (
         "你是一次工业模型续训实验的调度器。下面是一轮实验的状态 JSON。"
         "请只输出一个英文单词：train（继续常规训练）、conserve（小步微调）、keep（本轮不训练，沿用父权重）。\n"
@@ -204,8 +170,6 @@ def _ask(rnd, payload):
             break
     return decision, receipt.call_id
 
-
-# ------------------------------------------------------------------ 训练轮次
 def train(rnd):
     started = time.monotonic()
     budget = float(rnd.wall_seconds or 900.0)
@@ -372,10 +336,7 @@ def train(rnd):
     )
     _log("round %s 完成，用时 %.1fs" % (rnd.round_index, time.monotonic() - started))
 
-
-# ------------------------------------------------------------------ 推理
 _CACHE = {}
-
 
 def _load(model_dir):
     key = str(model_dir)
@@ -396,7 +357,6 @@ def _load(model_dir):
             _log("预测加载检查点 %s（epochs=%s）" % (path, model.meta.get("epochs")))
             return model
     raise RuntimeError("在 %s 下找不到检查点（%s）" % (root, CHECKPOINT))
-
 
 def predict(sample, model_dir):
     model = _load(model_dir)

@@ -1,4 +1,3 @@
-"""Small NumPy MLP + Adam. Checkpoints preserve every state needed to resume."""
 import hashlib
 import io
 import json
@@ -17,7 +16,6 @@ import numpy as np
 PARAMETERS = ("w1", "b1", "w2", "b2")
 FORMAT = "contest.cpu-mlp.v1"
 MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
-
 
 class Model:
     def __init__(self, task, paths, classes, x, y, *, hidden=32, seed=42, learning_rate=.003, batch_size=128):
@@ -109,7 +107,6 @@ class Model:
             target = y
         epoch_losses = []
         for _ in range(epochs):
-            # Epoch-indexed shuffling makes split/resumed execution reproduce a continuous run.
             rng = np.random.default_rng(np.random.SeedSequence([self.meta["seed"], self.meta["epochs"]]))
             order = rng.permutation(len(x))
             loss_sum = 0.0
@@ -163,7 +160,6 @@ class Model:
         arrays = {**self.params, **{"adam_first_" + k: v for k, v in self.first.items()},
                   **{"adam_second_" + k: v for k, v in self.second.items()}, "mean": self.mean, "scale": self.scale,
                   "metadata": np.array(json.dumps(self.meta, sort_keys=True, separators=(",", ":"), allow_nan=False))}
-        # Fixed ZIP metadata avoids changing the identity solely because of wall-clock time.
         with Path(path).open("xb") as stream, zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:
             for name in sorted(arrays):
                 buffer = io.BytesIO()
@@ -194,7 +190,6 @@ class Model:
             model.mean, model.scale = arrays["mean"].copy(), arrays["scale"].copy()
         model.validate()
         return model
-
 
 def checkpoint_digest(path):
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()

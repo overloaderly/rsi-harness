@@ -1,20 +1,3 @@
-"""离线端到端自测 / 演示：用假宿主跑 N 轮 train + 一次 predict，完全不需要平台。
-
-用法（在镜像内，需要 root 才能写 /previous 和 /model）：
-
-    docker run --rm --user 0 --entrypoint python3 rsi-harness:v1 \
-        /opt/harness-selftest/selftest.py --task A
-
-    # 演示模式：分轮横幅 + 平台视角前缀 + 决策桩按历史指标模拟网关模型
-    docker run --rm --user 0 --entrypoint python3 rsi-harness:v1 \
-        /opt/harness-selftest/selftest.py --task A --rounds 3 --demo
-
-    # 用真实公开数据（把 labs 目录挂进来）
-    docker run --rm --user 0 --entrypoint python3 -v B:\\whale\\智训引擎\\labs:/labs:ro rsi-harness:v1 \
-        /opt/harness-selftest/selftest.py --task B --data-dir /labs/cpu-b/public
-
-检查项：describe（平台侧另测）、N 轮 train（含 history/state/候选回传/回滚决策）、predict 输出合法性。
-"""
 import argparse
 import base64
 import hashlib
@@ -35,19 +18,15 @@ TASK = {"A": "classification", "B": "regression", "C": "regression"}
 TASK_NAME = {"A": "气体识别 · 6 类 · Macro-F1", "B": "轴承 RUL · RMSE/MAE · 分钟",
              "C": "发动机 RUL · RMSE/NASA 分 · 循环"}
 
-
 DEMO = False
 PRINT_LOCK = threading.Lock()
-
 
 def say(text=""):
     with PRINT_LOCK:
         print(text, flush=True)
 
-
 def log(message):
     say(("   [平台] " if DEMO else "[selftest] ") + str(message))
-
 
 def log_round(round_index, record):
     if DEMO:
@@ -58,26 +37,20 @@ def log_round(round_index, record):
     else:
         log("第 %d 轮完成: %s" % (round_index, json.dumps(record, ensure_ascii=False)[:400]))
 
-
 def banner(title, char="─", width=68):
     say("\n" + char * width)
     say(" " + title)
     say(char * width)
 
-
 def score_of(block):
     return block.get("score") if isinstance(block, dict) else None
-
 
 def fmt_score(value):
     return "n/a" if not isinstance(value, (int, float)) else "%.4f" % value
 
-
 def sha(raw):
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
-
-# ------------------------------------------------------------------ 造数据
 def synthetic(task_key, count, seed):
     import numpy as np
     rng = np.random.default_rng(seed)
@@ -101,7 +74,6 @@ def synthetic(task_key, count, seed):
         rows.append({"id": "synthetic-%04d" % index, "inputs": inputs, "answer": answer})
     return rows
 
-
 def load_rows(path):
     rows = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -109,11 +81,9 @@ def load_rows(path):
             rows.append(json.loads(line))
     return rows
 
-
 def write_rows(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-
 
 def build_arrays(rows, task_key):
     sys.path.insert(0, "/app")
@@ -132,8 +102,6 @@ def build_arrays(rows, task_key):
     dtype = np.int64 if task_key == "A" else np.float64
     return ids, np.asarray(features, dtype=np.float64), np.asarray(labels, dtype=dtype), paths
 
-
-# ------------------------------------------------------------------ 假宿主
 class Host:
     def __init__(self, demo=False):
         self.candidate = None
@@ -142,9 +110,7 @@ class Host:
         self.calls = 0
         self.demo = demo
 
-    # ---------------------------------------------------------- 决策桩
     def answer(self, frame):
-        """非演示模式下按环境变量返回固定决策；演示模式按历史指标模拟网关模型。"""
         if not self.demo:
             return os.environ.get("SELFTEST_DECISION", "train")
         payload = {}
@@ -246,7 +212,6 @@ class Host:
         return record
 
     def materialize_parent(self):
-        """把上一轮候选铺到 /previous，模拟平台挂载的父产物。"""
         target = Path("/previous")
         if target.exists():
             shutil.rmtree(target)
@@ -257,7 +222,6 @@ class Host:
             path.write_bytes(raw)
         return [{"path": name, "sha256": sha(raw), "size_bytes": len(raw)}
                 for name, raw in sorted(self.candidate["files"].items())]
-
 
 def start_frame(task_key, round_index, parent_files, parent_digest, artifacts, data_dir, state_dir):
     return {
@@ -284,7 +248,6 @@ def start_frame(task_key, round_index, parent_files, parent_digest, artifacts, d
         "resource_limits": {"cpu": 2, "memory_mb": 2048},
     }
 
-
 def predict_check(task_key, checkpoint, sample_inputs):
     model_dir = Path("/model")
     if model_dir.exists():
@@ -308,7 +271,6 @@ def predict_check(task_key, checkpoint, sample_inputs):
     for item in outputs:
         normalize_output(TASK[task_key], item)
     return outputs
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -365,7 +327,6 @@ def main():
     parent_digest = sha(parent_raw)
     log("父检查点 %d 字节" % len(parent_raw))
 
-    # 平台把父检查点挂在只读 /previous；自测里用 root 手动铺一份
     previous = Path("/previous")
     if previous.exists():
         shutil.rmtree(previous)
@@ -450,7 +411,6 @@ def main():
         say(" ledger.json 记录 %d 轮（读历史 → 做实验 → 依据结果决策 → 提交/回滚）" % args.rounds)
 
     log("自测通过 ✅")
-
 
 if __name__ == "__main__":
     main()

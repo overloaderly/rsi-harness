@@ -1,4 +1,3 @@
-"""Read only explicitly supplied public training/validation data."""
 import hashlib
 import json
 import math
@@ -10,10 +9,8 @@ import numpy as np
 MAX_BYTES = 128 * 1024 * 1024
 FORBIDDEN_INPUTS = {"truerul", "normalizedrul", "remainingusefullife", "rul", "totalsnapshots"}
 
-
 def sha256(raw):
     return "sha256:" + hashlib.sha256(raw).hexdigest()
-
 
 def unique_object(pairs):
     result = {}
@@ -23,12 +20,10 @@ def unique_object(pairs):
         result[key] = value
     return result
 
-
 def json_value(raw):
     def reject(_):
         raise ValueError("nonfinite JSON number")
     return json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject)
-
 
 def flatten(inputs):
     paths, values = [], []
@@ -52,7 +47,6 @@ def flatten(inputs):
     if not values or len(values) > 4096:
         raise ValueError("expected 1..4096 numeric features")
     return paths, values
-
 
 def read_dataset(path, task, classes=None, expected_paths=None):
     path = Path(path)
