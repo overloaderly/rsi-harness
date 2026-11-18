@@ -31,9 +31,9 @@ def log(message):
 def log_round(round_index, record):
     if DEMO:
         configuration = record.get("configuration") or {}
-        log("第 %d 轮完成：产物 %s · 决策 %s · 候选 %s" % (
+        log("第 %d 轮完成：%s  决策 %s  候选 %s" % (
             round_index, record.get("selected_artifact_id"),
-            configuration.get("decision"), json.dumps(configuration.get("validation"), ensure_ascii=False)))
+            configuration.get("decision"), fmt_score(score_of(configuration.get("validation")))))
     else:
         log("第 %d 轮完成: %s" % (round_index, json.dumps(record, ensure_ascii=False)[:400]))
 
@@ -410,7 +410,7 @@ def main():
         say("\n 用时 %.1fs · 全程无人工干预 · 每轮 1 次模型调用" % (time.monotonic() - started))
         say(" ledger.json 记录 %d 轮（读历史 → 做实验 → 依据结果决策 → 提交/回滚）" % args.rounds)
 
-    log("自测通过 ✅")
+    log("离线自测通过")
 
 if __name__ == "__main__":
     main()
