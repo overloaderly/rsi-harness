@@ -9,15 +9,19 @@ sys.path.insert(0, str(HARNESS / "vendor"))
 
 from contest_harness.predict import normalize_output  # noqa: E402
 
+# 数据集键 → 任务类型（predict 帧里的 task 字段要的是任务类型，不是 A/B/C）
+KIND = {"A": "classification", "B": "regression", "C": "regression"}
+
 
 def run(checkpoint, data_path, task, limit=0):
+    kind = KIND.get(str(task).upper(), str(task))
     rows = []
     for line in Path(data_path).read_text(encoding="utf-8").splitlines():
         if line.strip():
             rows.append(json.loads(line))
         if limit and len(rows) >= limit:
             break
-    payload = "".join(json.dumps({"task": task, "inputs": row["inputs"]}, ensure_ascii=False) + "\n" for row in rows)
+    payload = "".join(json.dumps({"task": kind, "inputs": row["inputs"]}, ensure_ascii=False) + "\n" for row in rows)
     env = dict(os.environ)
     env["PYTHONPATH"] = str(HARNESS / "vendor") + os.pathsep + str(HARNESS)
     env["CONTEST_ARTIFACT_PATH"] = str(checkpoint)
@@ -34,7 +38,7 @@ def run(checkpoint, data_path, task, limit=0):
     for index, line in enumerate(lines):
         try:
             body = json.loads(line)
-            normalize_output(task, body)
+            normalize_output(kind, body)
         except Exception as error:
             failures += 1
             if first is None:

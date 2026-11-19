@@ -7,7 +7,7 @@ rem   demo.bat            task A, 3 rounds, run straight through
 rem   demo.bat A pause    task A, wait for Enter after each round (narrate while recording)
 rem   demo.bat C          task C (engine RUL), 2 rounds, validation limited to 2000 rows
 
-set IMAGE=rsi-harness:v1
+set IMAGE=rsi-harness:v3
 set TASK=%~1
 if "%TASK%"=="" set TASK=A
 set PAUSE=%~2

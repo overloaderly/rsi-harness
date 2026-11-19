@@ -12,8 +12,31 @@ import time
 from pathlib import Path
 
 ROOT = Path(os.environ.get("SELFTEST_ROOT") or (Path(tempfile.gettempdir()) / "harness-selftest"))
-APP = Path(os.environ.get("SELFTEST_APP") or Path(__file__).resolve().parent)
+_DEFAULT_APP = Path("/app") if (Path("/app") / "harness.py").is_file() else Path(__file__).resolve().parent
+APP = Path(os.environ.get("SELFTEST_APP") or _DEFAULT_APP)
 ENTRY = APP / "harness.py"
+if str(APP) not in sys.path:
+    sys.path.insert(0, str(APP))
+
+
+def _platform_dir(env_name, platform_path, fallback):
+    """平台挂载点（/previous、/model）可写时优先用它，否则退回工作目录。
+
+    SDK 里 ParentView.root 和 predict 的 model_dir() 都写死了 /previous 与 /model，
+    所以自测必须把父子产物放到同样的位置，否则会报 PATH_UNSAFE。
+    """
+    value = os.environ.get(env_name)
+    if value:
+        return Path(value)
+    candidate = Path(platform_path)
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        probe = candidate / (".selftest-probe-%d" % os.getpid())
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return candidate
+    except OSError:
+        return Path(fallback)
 PREVIOUS = Path(os.environ.get("SELFTEST_PREVIOUS") or "/previous")
 MODEL = Path(os.environ.get("SELFTEST_MODEL") or "/model")
 PROTOCOL = "contest.harness.workspace.v2"
@@ -299,8 +322,8 @@ def main():
     if ROOT.exists() and not args.keep:
         shutil.rmtree(ROOT)
     global PREVIOUS, MODEL
-    PREVIOUS = Path(os.environ.get("SELFTEST_PREVIOUS") or (ROOT / "previous"))
-    MODEL = Path(os.environ.get("SELFTEST_MODEL") or (ROOT / "model"))
+    PREVIOUS = _platform_dir("SELFTEST_PREVIOUS", "/previous", ROOT / "previous")
+    MODEL = _platform_dir("SELFTEST_MODEL", "/model", ROOT / "model")
     PREVIOUS.mkdir(parents=True, exist_ok=True)
     MODEL.mkdir(parents=True, exist_ok=True)
     data_dir = ROOT / "data"
