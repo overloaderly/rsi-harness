@@ -57,3 +57,22 @@ docker save rsi-harness:v1 -o rsi-harness-v1.tar
 - 容器内离线自测 A/B/C 全部通过（A 走"提升→采纳"，B/C 正确触发"变差→回滚"）；
 - 真实公开数据挂载跑通，父检查点特征对齐、六类标签顺序一致；
 - `docker save` 归档可被 `docker load` 原样回灌（linux/amd64）。
+
+## 协议合规自检（v3）
+
+镜像遵循官方 `contest.harness.workspace.v2` 协议，三条入口命令均在镜像内实测通过：
+
+| 命令 | 作用 | 实测结果 |
+|---|---|---|
+| `python3 /app/harness.py describe` | 自描述入口声明 | `{"protocol":"contest.harness.workspace.v2","sdk_version":"1.0.2","tasks":["classification","regression"]}` |
+| `... train` | 一轮训练（读 /data 与 /previous，写候选、state，finish） | B 任务 7032 行 / 34 维，父基线 RMSE 681.16，PSI 2.28，调模型一次，产出 candidate 36604 字节，round_complete accepted |
+| `... predict` | 逐行预测 | A/B/C 三个数据集在容器内分别输出 6 分类概率与回归值，格式经官方 `normalize_output` 校验 |
+
+四轮自查发现并修复的具体问题：
+
+1. **协议层**：旧实现只读 `CONTEST_MODEL_FILE`，而协议下发的是 `CONTEST_ARTIFACT_PATH`；分类输出裸列表、并列最高分会越界。已全部修正。
+2. **训练层**：`except Exception` 过宽会把 `PARENT_DIGEST_MISMATCH` 吞掉并降级为目录扫描，等于绕过摘要校验；已改为对协议错误码直接抛出。
+3. **预测层**：用官方 `normalize_output` 逐行校验，A 1244/1244、B 1679/1679、C 3000/3000 全部通过；C 全量 23049 行耗时 8.7 s。
+4. **工具层**：离线自检脚本原先硬编码 `/tmp`、`/app`、`/previous`、`/model`，已改为可配置常量；SDK 自身固定 `/previous` 与 `/model`，故完整端到端只在镜像内验证。
+
+镜像规格：`linux/amd64`，`docker save` 未压缩 tar **185.7 MB**（平台上限 2 GB）。

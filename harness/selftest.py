@@ -6,13 +6,18 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
-ROOT = Path(os.environ.get("SELFTEST_ROOT", "/tmp/harness-selftest"))
+ROOT = Path(os.environ.get("SELFTEST_ROOT") or (Path(tempfile.gettempdir()) / "harness-selftest"))
+APP = Path(os.environ.get("SELFTEST_APP") or Path(__file__).resolve().parent)
+ENTRY = APP / "harness.py"
+PREVIOUS = Path(os.environ.get("SELFTEST_PREVIOUS") or "/previous")
+MODEL = Path(os.environ.get("SELFTEST_MODEL") or "/model")
 PROTOCOL = "contest.harness.workspace.v2"
-PREDICT_ARGV = ["python3", "/app/harness.py", "predict"]
+PREDICT_ARGV = ["python3", str(ENTRY), "predict"]
 CLASSES_A = ["Ethanol", "Ethylene", "Ammonia", "Acetaldehyde", "Acetone", "Toluene"]
 TASK = {"A": "classification", "B": "regression", "C": "regression"}
 TASK_NAME = {"A": "气体识别 · 6 类 · Macro-F1", "B": "轴承 RUL · RMSE/MAE · 分钟",
@@ -86,7 +91,7 @@ def write_rows(path, rows):
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
 
 def build_arrays(rows, task_key):
-    sys.path.insert(0, "/app")
+    sys.path.insert(0, str(APP))
     from rsi_data import flatten
     ids, features, labels, paths = [], [], [], None
     for row in rows:
@@ -156,7 +161,7 @@ class Host:
 
     def serve_train(self, start, history, timeout=900):
         process = subprocess.Popen(
-            [sys.executable, "/app/harness.py", "train"],
+            [sys.executable, str(ENTRY), "train"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", bufsize=1)
         threading.Thread(target=self._pump, args=(process.stderr,), daemon=True).start()
@@ -212,7 +217,7 @@ class Host:
         return record
 
     def materialize_parent(self):
-        target = Path("/previous")
+        target = PREVIOUS
         if target.exists():
             shutil.rmtree(target)
         target.mkdir(parents=True)
@@ -249,7 +254,7 @@ def start_frame(task_key, round_index, parent_files, parent_digest, artifacts, d
     }
 
 def predict_check(task_key, checkpoint, sample_inputs):
-    model_dir = Path("/model")
+    model_dir = MODEL
     if model_dir.exists():
         shutil.rmtree(model_dir)
     model_dir.mkdir(parents=True)
@@ -259,14 +264,14 @@ def predict_check(task_key, checkpoint, sample_inputs):
     env = dict(os.environ)
     env["CONTEST_PREDICTION_CONTEXT"] = json.dumps(context, ensure_ascii=False)
     lines = [json.dumps({"task": TASK[task_key], "inputs": item}, ensure_ascii=False) for item in sample_inputs]
-    finished = subprocess.run([sys.executable, "/app/harness.py", "predict"],
+    finished = subprocess.run([sys.executable, str(ENTRY), "predict"],
                               input="\n".join(lines) + "\n", capture_output=True, text=True, env=env)
     if finished.returncode != 0:
         raise RuntimeError("predict 失败: %s" % finished.stderr[-2000:])
     outputs = [json.loads(line) for line in finished.stdout.splitlines() if line.strip()]
     if len(outputs) != len(lines):
         raise RuntimeError("predict 输出行数不符: %d != %d" % (len(outputs), len(lines)))
-    sys.path.insert(0, "/app")
+    sys.path.insert(0, str(APP))
     from contest_harness.predict import normalize_output
     for item in outputs:
         normalize_output(TASK[task_key], item)
@@ -293,7 +298,11 @@ def main():
 
     if ROOT.exists() and not args.keep:
         shutil.rmtree(ROOT)
-    ROOT.mkdir(parents=True, exist_ok=True)
+    global PREVIOUS, MODEL
+    PREVIOUS = Path(os.environ.get("SELFTEST_PREVIOUS") or (ROOT / "previous"))
+    MODEL = Path(os.environ.get("SELFTEST_MODEL") or (ROOT / "model"))
+    PREVIOUS.mkdir(parents=True, exist_ok=True)
+    MODEL.mkdir(parents=True, exist_ok=True)
     data_dir = ROOT / "data"
     if args.data_dir:
         source = Path(args.data_dir)
@@ -311,7 +320,7 @@ def main():
     ids, x, y, paths = build_arrays(train, args.task)
     log("特征 %d 项，参数预算 %d" % (len(paths), len(paths) * 32 + 32 + (len(CLASSES_A) if args.task == "A" else 1) * 32))
 
-    sys.path.insert(0, "/app")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from rsi_model import Model
     parent_dir = ROOT / "parent"
     parent_dir.mkdir(parents=True, exist_ok=True)
@@ -327,7 +336,7 @@ def main():
     parent_digest = sha(parent_raw)
     log("父检查点 %d 字节" % len(parent_raw))
 
-    previous = Path("/previous")
+    previous = PREVIOUS
     if previous.exists():
         shutil.rmtree(previous)
     previous.mkdir(parents=True)
@@ -342,7 +351,7 @@ def main():
     for round_index in range(1, args.rounds + 1):
         if round_index > 1:
             parent_files = host.materialize_parent()
-            parent_digest = sha((Path("/previous") / parent_files[0]["path"]).read_bytes())
+            parent_digest = sha((PREVIOUS / parent_files[0]["path"]).read_bytes())
             artifacts = [{"artifact_id": artifact_id, "artifact": host.candidate["artifact"],
                           "files": parent_files}]
             state_dir = ROOT / "state-1"
